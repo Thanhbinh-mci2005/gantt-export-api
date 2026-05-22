@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import openpyxl
@@ -7,6 +7,7 @@ from openpyxl.utils import get_column_letter
 import json
 import io
 import urllib.parse
+import os
 
 app = FastAPI()
 
@@ -16,6 +17,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── API Key ───────────────────────────────────────────────
+# Đọc từ environment variable GANTT_API_KEY
+# Set trên Render: Environment → Add Environment Variable
+API_KEY = os.environ.get("GANTT_API_KEY", "")
+
+def verify_key(key: str):
+    if API_KEY and key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
 
 COLOR = {
     "header_bg":      "1F4E79",
@@ -67,7 +77,6 @@ def build_excel(body: dict) -> io.BytesIO:
     fixed_widths = [22, 28, 22, 18, 9, 9, 9]
     header_row   = FIXED_COLS + dates
 
-    # Header
     for col_idx, col_name in enumerate(header_row, start=1):
         cell = ws.cell(row=1, column=col_idx, value=col_name)
         cell.fill      = make_fill(COLOR["header_bg"])
@@ -78,7 +87,6 @@ def build_excel(body: dict) -> io.BytesIO:
 
     STATUS_TEXT = {1: "HOÀN THÀNH", 0: "CHƯA THỰC HIỆN", 2: "ĐANG THỰC HIỆN"}
 
-    # Data rows
     for row_idx, row in enumerate(rows, start=2):
         status     = int(row.get("status", 2))
         total      = float(row.get("total", 0))
@@ -112,7 +120,7 @@ def build_excel(body: dict) -> io.BytesIO:
 
         for d_idx, hours in enumerate(date_hours):
             col_idx = 8 + d_idx
-            h = float(hours) if hours else 0
+            h   = float(hours) if hours else 0
             val = f"{h:.2f}h" if h > 0 else ""
             bg  = COLOR["date_bg"] if h > 0 else "FFFFFF"
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
@@ -123,7 +131,6 @@ def build_excel(body: dict) -> io.BytesIO:
 
         ws.row_dimensions[row_idx].height = 20
 
-    # Footer
     footer_row = len(rows) + 2
     ws.merge_cells(start_row=footer_row, start_column=1,
                    end_row=footer_row,   end_column=4)
@@ -139,27 +146,28 @@ def build_excel(body: dict) -> io.BytesIO:
         (f"{grand_ot:.2f}h",    COLOR["ot_bg"],    COLOR["ot_fg"]),
     ]):
         cell = ws.cell(row=footer_row, column=5+i, value=val)
-        cell.fill = make_fill(bg); cell.font = make_font(fg, bold=True)
-        cell.alignment = make_align("center"); cell.border = make_border()
+        cell.fill = make_fill(bg)
+        cell.font = make_font(fg, bold=True)
+        cell.alignment = make_align("center")
+        cell.border = make_border()
 
     for d_idx, hours in enumerate(grand_date_hours):
         col_idx = 8 + d_idx
-        h = float(hours) if hours else 0
+        h   = float(hours) if hours else 0
         val = f"{h:.2f}h" if h > 0 else ""
         bg  = COLOR["footer_date_bg"] if h > 0 else COLOR["footer_bg"]
         cell = ws.cell(row=footer_row, column=col_idx, value=val)
         cell.fill = make_fill(bg)
         cell.font = make_font(COLOR["footer_fg"], bold=True)
-        cell.alignment = make_align("center"); cell.border = make_border()
+        cell.alignment = make_align("center")
+        cell.border = make_border()
     ws.row_dimensions[footer_row].height = 22
 
-    # Column widths
     for i, w in enumerate(fixed_widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     for d_idx in range(len(dates)):
         ws.column_dimensions[get_column_letter(8+d_idx)].width = 10
 
-    # Freeze panes
     ws.freeze_panes = "H2"
 
     output = io.BytesIO()
@@ -168,22 +176,12 @@ def build_excel(body: dict) -> io.BytesIO:
     return output
 
 
-# ── POST endpoint (giữ lại) ───────────────────────────────
-@app.post("/export-gantt")
-async def export_gantt_post(request: Request):
-    body = await request.json()
-    output   = build_excel(body)
-    filename = body.get("filename", "GanttChart") + ".xlsx"
-    return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"}
-    )
-
-
-# ── GET endpoint (dùng cho <a href> trong HTML visual) ────
 @app.get("/export-gantt")
-async def export_gantt_get(data: str = Query(...)):
+async def export_gantt_get(
+    data: str = Query(...),
+    key:  str = Query("")
+):
+    verify_key(key)
     body     = json.loads(urllib.parse.unquote(data))
     output   = build_excel(body)
     filename = body.get("filename", "GanttChart") + ".xlsx"
